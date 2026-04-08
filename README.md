@@ -29,10 +29,26 @@ Google Sheet phai duoc share cho:
 
 ## Chay tren may moi
 
+Neu may moi chua co `git`, cai bang lenh:
+
+```bash
+xcode-select --install
+```
+
+Sau khi cai xong, mo lai Terminal roi chay:
+
+```bash
+git clone https://github.com/lamm314/AutoReg_PP.git
+cd AutoReg_PP
+./setup.command
+```
+
+Hoac tach ra tung buoc:
+
 1. Clone repo:
 
 ```bash
-git clone <REPO_URL>
+git clone https://github.com/lamm314/AutoReg_PP.git
 cd AutoReg_PP
 ```
 
