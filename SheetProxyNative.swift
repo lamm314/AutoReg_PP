@@ -17,6 +17,28 @@ struct SheetRow: Identifiable {
 struct AppConfig: Codable {
     var sheetURL: String = ""
     var proxyKey: String = ""
+    var viotpToken: String = ""
+
+    enum CodingKeys: String, CodingKey {
+        case sheetURL
+        case proxyKey
+        case viotpToken
+    }
+
+    init() {}
+
+    init(sheetURL: String, proxyKey: String, viotpToken: String) {
+        self.sheetURL = sheetURL
+        self.proxyKey = proxyKey
+        self.viotpToken = viotpToken
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        sheetURL = try container.decodeIfPresent(String.self, forKey: .sheetURL) ?? ""
+        proxyKey = try container.decodeIfPresent(String.self, forKey: .proxyKey) ?? ""
+        viotpToken = try container.decodeIfPresent(String.self, forKey: .viotpToken) ?? ""
+    }
 }
 
 struct ServiceAccountCredentials: Decodable {
@@ -58,13 +80,18 @@ enum AppError: LocalizedError {
     case invalidSheetURL
     case missingSheetURL
     case missingProxyKey
+    case missingViOTPToken
     case invalidProxyResponse
+    case invalidViOTPResponse
     case invalidSheetResponse(Int)
     case serviceAccountNotFound
     case invalidServiceAccountFile
     case tokenRequestFailed(Int)
     case googleSheetsUpdateFailed(Int)
     case signingFailed
+    case viotpServiceNotFound(String)
+    case viotpAPIError(String)
+    case viotpCodeNotReady
 
     var errorDescription: String? {
         switch self {
@@ -74,8 +101,12 @@ enum AppError: LocalizedError {
             return "Ban chua nhap Google Sheet URL."
         case .missingProxyKey:
             return "Ban chua nhap Proxy API key."
+        case .missingViOTPToken:
+            return "Ban chua nhap VIOTP token."
         case .invalidProxyResponse:
             return "Phan hoi proxy khong hop le."
+        case .invalidViOTPResponse:
+            return "Phan hoi VIOTP khong hop le."
         case .invalidSheetResponse(let code):
             return "Khong doc duoc Google Sheet. HTTP \(code)"
         case .serviceAccountNotFound:
@@ -88,6 +119,12 @@ enum AppError: LocalizedError {
             return "Google Sheets API tra ve loi. HTTP \(code)"
         case .signingFailed:
             return "Khong ky duoc JWT bang private key cua service account."
+        case .viotpServiceNotFound(let name):
+            return "Khong tim thay dich vu \(name) trong danh sach VIOTP VN."
+        case .viotpAPIError(let message):
+            return message
+        case .viotpCodeNotReady:
+            return "Chua co code. Ban co the bam kiem tra lai."
         }
     }
 }
@@ -96,15 +133,23 @@ enum AppError: LocalizedError {
 final class AppViewModel: ObservableObject {
     @Published var sheetURL: String = ""
     @Published var proxyKey: String = ""
+    @Published var viotpToken: String = ""
     @Published var statusText: String = "San sang."
     @Published var proxyStatusText: String = "Chua doi proxy."
+    @Published var viotpStatusText: String = "Chua lay sim VIOTP."
     @Published var summaryText: String = "Chua tai du lieu"
     @Published var copyStatusText: String = "Bam vao o du lieu de copy."
     @Published var rowActionStatusText: String = "Chon trang thai va nhap so dien thoai de ghi vao cot L/M."
+    @Published var viotpPhoneNumber: String = ""
+    @Published var viotpOTPCode: String = ""
+    @Published var viotpRequestID: String = ""
+    @Published var viotpResolvedServiceName: String = "Paypal"
     @Published var rows: [SheetRow] = []
     @Published var isLoadingRows = false
     @Published var isChangingProxy = false
     @Published var isUpdatingSheet = false
+    @Published var isFetchingViOTPNumber = false
+    @Published var isCheckingViOTPCode = false
 
     private let sheetName = "people"
     private let resultLimit = 20
@@ -145,11 +190,13 @@ final class AppViewModel: ObservableObject {
         guard let config = try? JSONDecoder().decode(AppConfig.self, from: data) else { return }
         sheetURL = config.sheetURL
         proxyKey = config.proxyKey
+        viotpToken = config.viotpToken
     }
 
     func saveConfig() {
         let config = AppConfig(sheetURL: sheetURL.trimmingCharacters(in: .whitespacesAndNewlines),
-                               proxyKey: proxyKey.trimmingCharacters(in: .whitespacesAndNewlines))
+                               proxyKey: proxyKey.trimmingCharacters(in: .whitespacesAndNewlines),
+                               viotpToken: viotpToken.trimmingCharacters(in: .whitespacesAndNewlines))
         do {
             let data = try JSONEncoder.pretty.encode(config)
             try data.write(to: configURL, options: .atomic)
@@ -210,6 +257,77 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    func fetchPayPalPhoneNumberAndCode() {
+        saveConfig()
+        let currentToken = viotpToken.trimmed
+        guard !currentToken.isEmpty else {
+            viotpStatusText = AppError.missingViOTPToken.localizedDescription
+            return
+        }
+
+        isFetchingViOTPNumber = true
+        viotpStatusText = "Dang lay danh sach dich vu VIOTP..."
+        viotpPhoneNumber = ""
+        viotpRequestID = ""
+        viotpOTPCode = ""
+
+        Task {
+            do {
+                let service = try await fetchViOTPService(token: currentToken, country: "vn", nameHint: "paypal")
+                viotpResolvedServiceName = service.name
+                viotpStatusText = "Tim thay dich vu \(service.name) (ID \(service.id)). Dang thue sim..."
+
+                let rental = try await requestViOTPNumber(
+                    token: currentToken,
+                    serviceId: service.id
+                )
+
+                viotpPhoneNumber = rental.phoneNumber
+                viotpRequestID = rental.requestID
+                viotpStatusText = "Da lay so \(rental.phoneNumber). Cho 3 giay de kiem tra code..."
+
+                try await Task.sleep(nanoseconds: 3_000_000_000)
+
+                do {
+                    let code = try await fetchViOTPCode(token: currentToken, requestID: rental.requestID)
+                    viotpOTPCode = code
+                    viotpStatusText = "Da lay code \(code) cho so \(rental.phoneNumber)."
+                } catch AppError.viotpCodeNotReady {
+                    viotpStatusText = "Da lay so \(rental.phoneNumber), nhung sau 3 giay van chua co code. Bam kiem tra lai de request tiep."
+                }
+            } catch {
+                viotpStatusText = error.localizedDescription
+            }
+            isFetchingViOTPNumber = false
+        }
+    }
+
+    func checkLatestViOTPCode() {
+        let currentToken = viotpToken.trimmed
+        guard !currentToken.isEmpty else {
+            viotpStatusText = AppError.missingViOTPToken.localizedDescription
+            return
+        }
+        guard !viotpRequestID.isEmpty else {
+            viotpStatusText = "Chua co request_id de kiem tra code."
+            return
+        }
+
+        isCheckingViOTPCode = true
+        viotpStatusText = "Dang kiem tra code cho request_id \(viotpRequestID)..."
+
+        Task {
+            do {
+                let code = try await fetchViOTPCode(token: currentToken, requestID: viotpRequestID)
+                viotpOTPCode = code
+                viotpStatusText = "Da lay code \(code) cho so \(viotpPhoneNumber.isEmpty ? "-" : viotpPhoneNumber)."
+            } catch {
+                viotpStatusText = error.localizedDescription
+            }
+            isCheckingViOTPCode = false
+        }
+    }
+
     private func fetchSheetRows(sheetURL: String) async throws -> [SheetRow] {
         do {
             let values = try await fetchSheetRowsUsingServiceAccount(sheetURL: sheetURL)
@@ -257,6 +375,123 @@ final class AppViewModel: ObservableObject {
             return "status=0 | \(message) | Da doi proxy, nen cho on dinh them 5-10 giay."
         }
         return "status=\(status) | \(message)"
+    }
+
+    private func fetchViOTPService(token: String, country: String, nameHint: String) async throws -> (id: String, name: String) {
+        let payload = try await performViOTPGET(
+            path: "/service/getv2",
+            queryItems: [
+                URLQueryItem(name: "token", value: token),
+                URLQueryItem(name: "country", value: country),
+            ]
+        )
+
+        guard let services = payload["data"] as? [Any] else {
+            throw AppError.invalidViOTPResponse
+        }
+
+        let normalizedHint = normalizedSearchText(nameHint)
+
+        for item in services {
+            guard let object = item as? [String: Any] else { continue }
+            let name = firstString(in: object, keys: ["name", "service_name", "serviceName", "Name"]) ?? ""
+            let id = firstString(in: object, keys: ["id", "serviceId", "service_id", "ID"])
+
+            if normalizedSearchText(name).contains(normalizedHint), let id, !id.isEmpty {
+                return (id, name)
+            }
+        }
+
+        throw AppError.viotpServiceNotFound("Paypal")
+    }
+
+    private func requestViOTPNumber(token: String, serviceId: String) async throws -> (phoneNumber: String, requestID: String) {
+        let payload = try await performViOTPGET(
+            path: "/request/getv2",
+            queryItems: [
+                URLQueryItem(name: "token", value: token),
+                URLQueryItem(name: "serviceId", value: serviceId),
+            ]
+        )
+
+        guard let data = payload["data"] as? [String: Any] else {
+            throw AppError.invalidViOTPResponse
+        }
+
+        let phoneNumber = firstString(in: data, keys: ["phone_number", "PhoneNumber", "phoneNumber"]) ?? ""
+        let requestID = firstString(in: data, keys: ["request_id", "requestId", "RequestId"]) ?? ""
+
+        guard !phoneNumber.isEmpty, !requestID.isEmpty else {
+            throw AppError.invalidViOTPResponse
+        }
+
+        return (phoneNumber, requestID)
+    }
+
+    private func fetchViOTPCode(token: String, requestID: String) async throws -> String {
+        let payload = try await performViOTPGET(
+            path: "/session/getv2",
+            queryItems: [
+                URLQueryItem(name: "requestId", value: requestID),
+                URLQueryItem(name: "token", value: token),
+            ]
+        )
+
+        if let data = payload["data"] as? [String: Any] {
+            if let directCode = firstString(in: data, keys: ["Code", "code", "otp", "OTP", "smsCode", "sms_code"]),
+               !directCode.isEmpty {
+                return directCode
+            }
+
+            for key in ["content", "smsContent", "sms_content", "message", "Message", "SMS"] {
+                if let text = data[key] as? String,
+                   let extractedCode = extractOTPCode(from: text) {
+                    return extractedCode
+                }
+            }
+        }
+
+        if let message = payload["message"] as? String,
+           let extractedCode = extractOTPCode(from: message) {
+            return extractedCode
+        }
+
+        throw AppError.viotpCodeNotReady
+    }
+
+    private func performViOTPGET(path: String, queryItems: [URLQueryItem]) async throws -> [String: Any] {
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "api.viotp.com"
+        components.path = path
+        components.queryItems = queryItems
+
+        guard let url = components.url else {
+            throw AppError.invalidViOTPResponse
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            throw AppError.viotpAPIError("VIOTP tra ve loi HTTP \(http.statusCode).")
+        }
+
+        guard let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw AppError.invalidViOTPResponse
+        }
+
+        let statusCode = firstInt(in: payload, keys: ["status_code", "statusCode"]) ?? 200
+        let success = payload["success"] as? Bool ?? (statusCode == 200)
+        if !success || statusCode != 200 {
+            let message = (payload["message"] as? String)?.trimmed
+            throw AppError.viotpAPIError(message?.isEmpty == false ? message! : "VIOTP tra ve loi \(statusCode).")
+        }
+
+        return payload
     }
 
     private func buildCSVURL(from sheetURL: String) throws -> URL {
@@ -592,6 +827,58 @@ final class AppViewModel: ObservableObject {
         }
         return spreadsheetID
     }
+
+    private func firstString(in object: [String: Any], keys: [String]) -> String? {
+        for key in keys {
+            if let value = object[key] as? String {
+                let trimmed = value.trimmed
+                if !trimmed.isEmpty {
+                    return trimmed
+                }
+            }
+
+            if let value = object[key] as? NSNumber {
+                return value.stringValue
+            }
+        }
+
+        return nil
+    }
+
+    private func firstInt(in object: [String: Any], keys: [String]) -> Int? {
+        for key in keys {
+            if let value = object[key] as? Int {
+                return value
+            }
+
+            if let value = object[key] as? NSNumber {
+                return value.intValue
+            }
+
+            if let value = object[key] as? String, let intValue = Int(value) {
+                return intValue
+            }
+        }
+
+        return nil
+    }
+
+    private func normalizedSearchText(_ text: String) -> String {
+        text
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func extractOTPCode(from text: String) -> String? {
+        let pattern = "\\b\\d{4,8}\\b"
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = regex.firstMatch(in: text, options: [], range: range),
+              let matchRange = Range(match.range, in: text) else {
+            return nil
+        }
+        return String(text[matchRange])
+    }
 }
 
 struct ContentView: View {
@@ -618,6 +905,11 @@ struct ContentView: View {
                 selectedRowID = nil
             }
         }
+        .onChange(of: viewModel.viotpPhoneNumber) { _, newValue in
+            if !newValue.isEmpty {
+                phoneNumber = newValue
+            }
+        }
     }
 
     private var selectedRow: SheetRow? {
@@ -628,7 +920,7 @@ struct ContentView: View {
     private var configSection: some View {
         GroupBox("Cau hinh") {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Nhap link Google Sheet va Proxy API key. App luu du lieu vao app_config.json.")
+                Text("Nhap link Google Sheet, Proxy API key va VIOTP token. App luu du lieu vao app_config.json.")
                     .foregroundStyle(.secondary)
 
                 HStack {
@@ -642,6 +934,13 @@ struct ContentView: View {
                     Text("Proxy API key")
                         .frame(width: 130, alignment: .leading)
                     TextField("TEST0123456789", text: $viewModel.proxyKey)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                HStack {
+                    Text("VIOTP token")
+                        .frame(width: 130, alignment: .leading)
+                    TextField("Nhap token VIOTP cua ban", text: $viewModel.viotpToken)
                         .textFieldStyle(.roundedBorder)
                 }
 
@@ -670,6 +969,7 @@ struct ContentView: View {
                 Text("So dong: \(viewModel.summaryText)")
                 Text("Doc sheet: \(viewModel.statusText)")
                 Text("Proxy: \(viewModel.proxyStatusText)")
+                Text("VIOTP: \(viewModel.viotpStatusText)")
                 Text("Copy: \(viewModel.copyStatusText)")
                 Text("Cap nhat L/M: \(viewModel.rowActionStatusText)")
             }
@@ -726,6 +1026,7 @@ struct ContentView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         detailHeader(row)
                         detailGrid(row)
+                        viotpSection
                         actionSection(row)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -794,6 +1095,54 @@ struct ContentView: View {
         }
         .buttonStyle(.plain)
         .help("Bam de copy")
+    }
+
+    private var viotpSection: some View {
+        GroupBox("Lay sim VIOTP cho Paypal") {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Mac dinh tim dich vu Paypal trong danh sach VN. Moi lan lay so moi, app se tu ghi de vao o so dien thoai va doi 3 giay roi kiem tra code 1 lan.")
+                    .foregroundStyle(.secondary)
+
+                HStack(spacing: 12) {
+                    Text("Dich vu")
+                        .frame(width: 90, alignment: .leading)
+                    Text(viewModel.viotpResolvedServiceName)
+                    Spacer()
+                    Text("Quoc gia: VN")
+                        .foregroundStyle(.secondary)
+                }
+
+                HStack(spacing: 12) {
+                    Text("So da lay")
+                        .frame(width: 90, alignment: .leading)
+                    Text(viewModel.viotpPhoneNumber.isEmpty ? "(chua co)" : viewModel.viotpPhoneNumber)
+                    Spacer()
+                    if !viewModel.viotpRequestID.isEmpty {
+                        Text("request_id: \(viewModel.viotpRequestID)")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                HStack(spacing: 12) {
+                    Text("OTP")
+                        .frame(width: 90, alignment: .leading)
+                    Text(viewModel.viotpOTPCode.isEmpty ? "(chua co)" : viewModel.viotpOTPCode)
+                        .font(.system(size: 15, weight: .semibold))
+                }
+
+                HStack(spacing: 12) {
+                    Button(viewModel.isFetchingViOTPNumber ? "Dang lay sim..." : "Lay sim Paypal + doi code") {
+                        viewModel.fetchPayPalPhoneNumberAndCode()
+                    }
+                    .disabled(viewModel.isFetchingViOTPNumber || viewModel.isCheckingViOTPCode)
+
+                    Button(viewModel.isCheckingViOTPCode ? "Dang kiem tra..." : "Kiem tra lai code") {
+                        viewModel.checkLatestViOTPCode()
+                    }
+                    .disabled(viewModel.isFetchingViOTPNumber || viewModel.isCheckingViOTPCode || viewModel.viotpRequestID.isEmpty)
+                }
+            }
+        }
     }
 
     private func actionSection(_ row: SheetRow) -> some View {
