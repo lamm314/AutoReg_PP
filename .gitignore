@@ -6,4 +6,5 @@ app_config.json
 token.json
 *.service-account.json
 carbide-booth-492715-t7-b0686577f711.json
+carbide-booth*.json
 client_secret_*.json
