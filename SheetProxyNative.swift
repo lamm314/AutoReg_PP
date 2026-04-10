@@ -284,17 +284,7 @@ final class AppViewModel: ObservableObject {
 
                 viotpPhoneNumber = rental.phoneNumber
                 viotpRequestID = rental.requestID
-                viotpStatusText = "Da lay so \(rental.phoneNumber). Cho 3 giay de kiem tra code..."
-
-                try await Task.sleep(nanoseconds: 3_000_000_000)
-
-                do {
-                    let code = try await fetchViOTPCode(token: currentToken, requestID: rental.requestID)
-                    viotpOTPCode = code
-                    viotpStatusText = "Da lay code \(code) cho so \(rental.phoneNumber)."
-                } catch AppError.viotpCodeNotReady {
-                    viotpStatusText = "Da lay so \(rental.phoneNumber), nhung sau 3 giay van chua co code. Bam kiem tra lai de request tiep."
-                }
+                viotpStatusText = "Da lay so \(rental.phoneNumber)."
             } catch {
                 viotpStatusText = error.localizedDescription
             }
@@ -1100,7 +1090,7 @@ struct ContentView: View {
     private var viotpSection: some View {
         GroupBox("Lay sim VIOTP cho Paypal") {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Mac dinh tim dich vu Paypal trong danh sach VN. Moi lan lay so moi, app se tu ghi de vao o so dien thoai va doi 3 giay roi kiem tra code 1 lan.")
+                Text("Mac dinh tim dich vu Paypal trong danh sach VN. Moi lan lay so moi, app se tu ghi de vao o so dien thoai. Neu can, ban co the tu bam kiem tra code sau.")
                     .foregroundStyle(.secondary)
 
                 HStack(spacing: 12) {
@@ -1131,7 +1121,7 @@ struct ContentView: View {
                 }
 
                 HStack(spacing: 12) {
-                    Button(viewModel.isFetchingViOTPNumber ? "Dang lay sim..." : "Lay sim Paypal + doi code") {
+                    Button(viewModel.isFetchingViOTPNumber ? "Dang lay sim..." : "Lay sim Paypal") {
                         viewModel.fetchPayPalPhoneNumberAndCode()
                     }
                     .disabled(viewModel.isFetchingViOTPNumber || viewModel.isCheckingViOTPCode)
